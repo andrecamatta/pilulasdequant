@@ -1,0 +1,95 @@
+# Programador na nuvem: Claude Code rodando numa máquina do GitHub Actions.
+# Instalado em cada repositório por scripts/cloud-coder.sh (não edite a cópia do repositório; edite esta).
+# Dispara de dois jeitos:
+#   - pelo camattiones: gh workflow run claude.yml -R dono/repo -f prompt="..." [-f ref=branch] [-f model=...]
+#   - pelo GitHub (celular inclusive): comentário ou issue com @claude, só do dono do repositório
+name: Claude
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Tarefa"
+        required: true
+        type: string
+      ref:
+        description: "Branch base (vazio = padrão do repositório)"
+        required: false
+        type: string
+      model:
+        description: "Modelo (vazio = padrão da action)"
+        required: false
+        type: string
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write   # troca OIDC pelo token do app Claude
+  actions: read     # ler resultado do CI
+
+jobs:
+  claude:
+    # só o dono dispara: em repositório público, qualquer um pode comentar
+    if: |
+      github.actor == github.repository_owner && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || '' }}
+          fetch-depth: 0
+
+      # pedido do camattiones (ou da aba Actions): tarefa completa, termina em PR
+      - name: Claude Code (tarefa)
+        id: claude
+        if: github.event_name == 'workflow_dispatch'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: ${{ inputs.model && format('--model {0}', inputs.model) || '' }}
+          prompt: |
+            ${{ inputs.prompt }}
+
+            ---
+            Regras desta execução (camattiones, programador na nuvem):
+            - Trabalhe num branch novo claude/<assunto-curto>, a partir do branch em que o checkout está.
+            - Siga o CLAUDE.md do repositório, se houver. Rode os testes do projeto antes de terminar.
+            - No fim, faça commit, push do branch e abra um PR com gh pr create (título curto; corpo com o
+              que mudou e o resultado dos testes).
+            - Nunca faça push no branch padrão nem merge de PR.
+            - Responda em português do Brasil.
+
+      # @claude em issue ou PR: a action responde no próprio comentário
+      - name: Claude Code (@claude)
+        if: github.event_name != 'workflow_dispatch'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      - name: Resumo
+        if: always() && github.event_name == 'workflow_dispatch'
+        env:
+          BRANCH: ${{ steps.claude.outputs.branch_name }}
+          CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+        run: |
+          {
+            echo "### Programador na nuvem"
+            echo "- Resultado: ${CONCLUSION:-desconhecido}"
+            [ -n "$BRANCH" ] && echo "- Branch: \`$BRANCH\`"
+          } >> "$GITHUB_STEP_SUMMARY"
